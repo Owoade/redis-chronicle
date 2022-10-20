@@ -1,12 +1,18 @@
 import dotenv from "dotenv";
 import express, { Request, Response } from "express";
 import { createClient } from "redis";
-import axios from "axios";
+import mongoose from "mongoose"
+import User from "./models/user";
+import Event from "events";
+import RedisEventAdapter from "./event-adapter";
 
 
 dotenv.config();
 
-const app = express();
+export const app = express();
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 
 const redis = createClient({
     url: process.env.REDIS_URL,
@@ -14,36 +20,56 @@ const redis = createClient({
     password: process.env.REDIS_PASSWORD
 })
 
-redis.on("error", err => console.log(err) )
+const redisAdapter = new RedisEventAdapter(redis as any);
 
 
-app.get("/currency/:currencyCode", async function( req: Request, res: Response){
-    const { currencyCode } = req.params;
+app.get("/get-user/:userId", async ( req: Request, res: Response )=>{
 
-    redis.get(currencyCode)
-    .then( async ( rates ) => {
-        if( rates == null ){
-            console.log("Cache miss");
-            // Get data from api end point
-            const API_KEY = process.env.RAPID_API_KEY;
-            const ax_res = await axios.get( `https://v6.exchangerate-api.com/v6/${API_KEY}/latest/${currencyCode}` );
-            res.json( ax_res.data.conversion_rates );
-            // Error Handling
-            if( ax_res.data.result === "success" ){
-                const conversion_rates = JSON.stringify(ax_res.data.conversion_rates)
-                await redis.setEx( currencyCode, 1000, conversion_rates )
-            }
-            
-            return
-        }
-        console.log("Cache hit")
-        return res.json( JSON.parse(await redis.get(currencyCode) as string) ) 
+    const user_id = req.params.userId;
+    
+    try{
+        const user = await redisAdapter.get( user_id );
+        res.json( {...JSON.parse(user), cache_status: "hit"} );
+        console.log("Cache hit");
 
-    })
+    }catch(err: any){
+
+        console.log("Cache miss")
+        const user = await User.findById( user_id );
+        redisAdapter.emit("set-cache", user_id, JSON.stringify( user ));
+        res.json( {...user, cache_status: "miss"} )
+    }
+    
 })
 
-redis.connect()
-.then(()=> app.listen(3000, () => console.log("Redis and the server are live!!!")))
+app.patch("/update-user/:userId", async ( req: Request, res: Response ) => {
+    const user_id = req.params.userId;
+
+    const updated_user = await User.findByIdAndUpdate( user_id, req.body.update, { new: true} );
+
+    redisAdapter.emit("set-cache", user_id, JSON.stringify(updated_user));
+
+    res.json(updated_user)
+})
+
+redis.on("error", err => console.log(err) );
+const promiseArray = [ redis.connect(), mongoose.connect( process.env.MONGO_DB_URL as string ) ];
+
+Promise.all( promiseArray )
+.then( ()=> app.listen(3000, ()=> console.log("Server is up and running ")));
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
